@@ -6,16 +6,20 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torchvision import transforms
 import network, loss
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from data_list import ImageList
 import random, pdb, math, copy
 from tqdm import tqdm
 from loss import CrossEntropyLabelSmooth
 from scipy.spatial.distance import cdist
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.cluster import KMeans
+from evaluation import *
+import wandb
+from pprint import pprint
 
 def op_copy(optimizer):
     for param_group in optimizer.param_groups:
@@ -95,47 +99,80 @@ def data_load(args):
 
     if args.trte == "val":
         dsize = len(txt_src)
-        tr_size = int(0.9*dsize)
-        # print(dsize, tr_size, dsize - tr_size)
-        tr_txt, te_txt = torch.utils.data.random_split(txt_src, [tr_size, dsize - tr_size])
+        tr_size = int(0.5*dsize)
+        tr_txt, te_txt = torch.utils.data.random_split(txt_src, [tr_size, dsize - tr_size], generator=torch.Generator().manual_seed(0))
     else:
         dsize = len(txt_src)
-        tr_size = int(0.9*dsize)
-        _, te_txt = torch.utils.data.random_split(txt_src, [tr_size, dsize - tr_size])
+        tr_size = int(0.5*dsize)
+        _, te_txt = torch.utils.data.random_split(txt_src, [tr_size, dsize - tr_size], generator=torch.Generator().manual_seed(0))
         tr_txt = txt_src
 
     dsets["source_tr"] = ImageList(tr_txt, transform=image_train())
-    dset_loaders["source_tr"] = DataLoader(dsets["source_tr"], batch_size=train_bs, shuffle=True, num_workers=args.worker, drop_last=False)
     dsets["source_te"] = ImageList(te_txt, transform=image_test())
-    dset_loaders["source_te"] = DataLoader(dsets["source_te"], batch_size=train_bs, shuffle=True, num_workers=args.worker, drop_last=False)
     dsets["test"] = ImageList(txt_test, transform=image_test())
-    dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*2, shuffle=True, num_workers=args.worker, drop_last=False)
+    source_tr_sampler = None
+    source_te_sampler = None
+    test_sampler = None
+    g = torch.Generator()
+    g.manual_seed(0)
+    if args.train_resampling:
+        weights = dsets["source_tr"].get_weights(args.train_resampling)
+        source_tr_sampler = WeightedRandomSampler(weights, len(weights), replacement=True, generator=g)
+    if args.test_resampling:
+        weights = dsets["source_te"].get_weights(args.test_resampling)
+        source_te_sampler = WeightedRandomSampler(weights, len(weights), replacement=True, generator=g)
+        test_weights = dsets["test"].get_weights(args.test_resampling)
+        test_sampler = WeightedRandomSampler(test_weights, len(test_weights), replacement=True, generator=g)
+
+    dset_loaders["source_tr"] = DataLoader(dsets["source_tr"], batch_size=train_bs, sampler=source_tr_sampler, num_workers=args.worker, drop_last=False)
+    dset_loaders["source_te"] = DataLoader(dsets["source_te"], batch_size=train_bs, sampler=source_te_sampler, num_workers=args.worker, drop_last=False)
+    dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*2, sampler=test_sampler, num_workers=args.worker, drop_last=False)
 
     return dset_loaders
 
 def cal_acc(loader, netF, netB, netC, flag=False):
     start_test = True
+    group_metrics = {}
     with torch.no_grad():
         iter_test = iter(loader)
         for i in range(len(loader)):
-            data = iter_test.next()
+            data = next(iter_test)
             inputs = data[0]
             labels = data[1]
+            sensitives = data[2]
             inputs = inputs.cuda()
             outputs = netC(netB(netF(inputs)))
             if start_test:
                 all_output = outputs.float().cpu()
-                all_label = labels.float()
+                all_label = labels.float().cpu()
+                all_sensitives = sensitives.float().cpu()
                 start_test = False
             else:
                 all_output = torch.cat((all_output, outputs.float().cpu()), 0)
-                all_label = torch.cat((all_label, labels.float()), 0)
+                all_label = torch.cat((all_label, labels.float().cpu()), 0)
+                all_sensitives =  torch.cat((all_sensitives, sensitives.float().cpu()), 0)
 
-    all_output = nn.Softmax(dim=1)(all_output)
+    print('\nEval Y0/Y1', all_output[all_label.squeeze()==0].shape, all_output[all_label.squeeze()==1].shape)
+    for sa in range(5):
+        print(f'A{sa} Total/Y0/Y1:', all_output[all_sensitives.squeeze()==sa].shape,
+                    all_output[torch.logical_and((all_sensitives.squeeze()==sa),(all_label.squeeze()==0))].shape,
+                    all_output[torch.logical_and((all_sensitives.squeeze()==sa),(all_label.squeeze()==1))].shape)
+
     _, predict = torch.max(all_output, 1)
     accuracy = torch.sum(torch.squeeze(predict).float() == all_label).item() / float(all_label.size()[0])
-    mean_ent = torch.mean(loss.Entropy(all_output)).cpu().data.item()
-   
+    mean_ent = torch.mean(loss.Entropy(nn.Softmax(dim=1)(all_output))).cpu().data.item()
+    auc = calculate_auc(F.softmax(all_output, dim=1)[:, 1], all_label.cpu())
+    for sa in range(5):
+        output_sa = all_output[all_sensitives.squeeze()==sa]
+        labels_sa = all_label[all_sensitives.squeeze()==sa]
+        group_metrics[f'acc A{sa}'] = accuracy_score(labels_sa.to('cpu'), output_sa.to('cpu').max(1)[1])
+        group_metrics[f'auc A{sa}'] = calculate_auc(F.softmax(output_sa, dim=1)[:, 1].detach().cpu(), labels_sa.to('cpu'))
+        group_metrics[f'entropy A{sa}'] = -(output_sa.softmax(1) * output_sa.log_softmax(1)).sum(1).mean(0).item()
+    pprint(group_metrics)
+
+    if args.wandb:
+        wandb.log({'auc': auc, 'acc': accuracy, 'mean_ent': mean_ent})
+        wandb.log(group_metrics)
     if flag:
         matrix = confusion_matrix(all_label, torch.squeeze(predict).float())
         acc = matrix.diagonal()/matrix.sum(axis=1) * 100
@@ -144,16 +181,17 @@ def cal_acc(loader, netF, netB, netC, flag=False):
         acc = ' '.join(aa)
         return aacc, acc
     else:
-        return accuracy*100, mean_ent
+        return accuracy, mean_ent
 
 def cal_acc_oda(loader, netF, netB, netC):
     start_test = True
     with torch.no_grad():
         iter_test = iter(loader)
         for i in range(len(loader)):
-            data = iter_test.next()
+            data = next(iter_test)
             inputs = data[0]
             labels = data[1]
+            sensitives = data[2]
             inputs = inputs.cuda()
             outputs = netC(netB(netF(inputs)))
             if start_test:
@@ -206,7 +244,7 @@ def train_source(args):
 
     acc_init = 0
     max_iter = args.max_epoch * len(dset_loaders["source_tr"])
-    interval_iter = max_iter // 10
+    interval_iter = max_iter // 100
     iter_num = 0
 
     netF.train()
@@ -215,11 +253,11 @@ def train_source(args):
 
     while iter_num < max_iter:
         try:
-            inputs_source, labels_source = iter_source.next()
+            inputs_source, labels_source, sensitives_source = next(iter_source)
         except:
             iter_source = iter(dset_loaders["source_tr"])
-            inputs_source, labels_source = iter_source.next()
-
+            inputs_source, labels_source, sensitives_source = next(iter_source)
+        #labels_source = torch.tensor(labels_source).to(inputs_source.device)
         if inputs_source.size(0) == 1:
             continue
 
@@ -229,38 +267,40 @@ def train_source(args):
         inputs_source, labels_source = inputs_source.cuda(), labels_source.cuda()
         outputs_source = netC(netB(netF(inputs_source)))
         classifier_loss = CrossEntropyLabelSmooth(num_classes=args.class_num, epsilon=args.smooth)(outputs_source, labels_source)            
-        
+
         optimizer.zero_grad()
         classifier_loss.backward()
         optimizer.step()
 
-        if iter_num % interval_iter == 0 or iter_num == max_iter:
+        if args.wandb:
+            wandb.log({'classifier_loss': classifier_loss})
+        if iter_num % interval_iter == 1 or iter_num == max_iter:
             netF.eval()
             netB.eval()
             netC.eval()
             if args.dset=='VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['source_te'], netF, netB, netC, True)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%'.format(args.name_src, iter_num, max_iter, acc_s_te) + '\n' + acc_list
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name_src, iter_num, max_iter, acc_s_te) + '\n' + acc_list
             else:
                 acc_s_te, _ = cal_acc(dset_loaders['source_te'], netF, netB, netC, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.2f}%'.format(args.name_src, iter_num, max_iter, acc_s_te)
+                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name_src, iter_num, max_iter, acc_s_te)
             args.out_file.write(log_str + '\n')
             args.out_file.flush()
             print(log_str+'\n')
-
+            if args.wandb:
+                wandb.log({'acc_s_te': acc_s_te})
             if acc_s_te >= acc_init:
                 acc_init = acc_s_te
                 best_netF = netF.state_dict()
                 best_netB = netB.state_dict()
                 best_netC = netC.state_dict()
+                torch.save(best_netF, osp.join(args.output_dir_src, "source_F.pt"))
+                torch.save(best_netB, osp.join(args.output_dir_src, "source_B.pt"))
+                torch.save(best_netC, osp.join(args.output_dir_src, "source_C.pt"))
 
             netF.train()
             netB.train()
             netC.train()
-                
-    torch.save(best_netF, osp.join(args.output_dir_src, "source_F.pt"))
-    torch.save(best_netB, osp.join(args.output_dir_src, "source_B.pt"))
-    torch.save(best_netC, osp.join(args.output_dir_src, "source_C.pt"))
 
     return netF, netB, netC
 
@@ -287,14 +327,14 @@ def test_target(args):
 
     if args.da == 'oda':
         acc_os1, acc_os2, acc_unknown = cal_acc_oda(dset_loaders['test'], netF, netB, netC)
-        log_str = '\nTraining: {}, Task: {}, Accuracy = {:.2f}% / {:.2f}% / {:.2f}%'.format(args.trte, args.name, acc_os2, acc_os1, acc_unknown)
+        log_str = '\nTraining: {}, Task: {}, Accuracy = {:.4f} / {:.4f} / {:.4f}'.format(args.trte, args.name, acc_os2, acc_os1, acc_unknown)
     else:
         if args.dset=='VISDA-C':
             acc, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, True)
-            log_str = '\nTraining: {}, Task: {}, Accuracy = {:.2f}%'.format(args.trte, args.name, acc) + '\n' + acc_list
+            log_str = '\nTraining: {}, Task: {}, Accuracy = {:.4f}'.format(args.trte, args.name, acc) + '\n' + acc_list
         else:
             acc, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
-            log_str = '\nTraining: {}, Task: {}, Accuracy = {:.2f}%'.format(args.trte, args.name, acc)
+            log_str = '\nTraining: {}, Task: {}, Accuracy = {:.4f}'.format(args.trte, args.name, acc)
 
     args.out_file.write(log_str)
     args.out_file.flush()
@@ -314,7 +354,7 @@ if __name__ == "__main__":
     parser.add_argument('--max_epoch', type=int, default=20, help="max iterations")
     parser.add_argument('--batch_size', type=int, default=64, help="batch_size")
     parser.add_argument('--worker', type=int, default=4, help="number of workers")
-    parser.add_argument('--dset', type=str, default='office-home', choices=['VISDA-C', 'office', 'office-home', 'office-caltech'])
+    parser.add_argument('--dset', type=str, default='office-home', choices=['cardiomegaly', 'VISDA-C', 'office', 'office-home', 'office-caltech'])
     parser.add_argument('--lr', type=float, default=1e-2, help="learning rate")
     parser.add_argument('--net', type=str, default='resnet50', help="vgg16, resnet50, resnet101")
     parser.add_argument('--seed', type=int, default=2020, help="random seed")
@@ -322,15 +362,23 @@ if __name__ == "__main__":
     parser.add_argument('--epsilon', type=float, default=1e-5)
     parser.add_argument('--layer', type=str, default="wn", choices=["linear", "wn"])
     parser.add_argument('--classifier', type=str, default="bn", choices=["ori", "bn"])
-    parser.add_argument('--smooth', type=float, default=0.1)   
-    parser.add_argument('--output', type=str, default='san')
+    parser.add_argument('--smooth', type=float, default=0.1)
+    parser.add_argument('--output', type=str, default='ckps/SHOT/source')
     parser.add_argument('--da', type=str, default='uda', choices=['uda', 'pda', 'oda'])
     parser.add_argument('--trte', type=str, default='val', choices=['full', 'val'])
+    parser.add_argument('--run_name', type=str, default='chexpert_source')
+    parser.add_argument('--proj_name', type=str, default='SHOT')
+    parser.add_argument('--train_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
+    parser.add_argument('--test_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
+    parser.add_argument('--wandb', action='store_true', help="Use wandb")
     args = parser.parse_args()
+
+    if args.wandb:
+        wandb.init(project=args.proj_name, name=args.run_name, config=args)
 
     if args.dset == 'office-home':
         names = ['Art', 'Clipart', 'Product', 'RealWorld']
-        args.class_num = 65 
+        args.class_num = 65
     if args.dset == 'office':
         names = ['amazon', 'dslr', 'webcam']
         args.class_num = 31
@@ -340,11 +388,15 @@ if __name__ == "__main__":
     if args.dset == 'office-caltech':
         names = ['amazon', 'caltech', 'dslr', 'webcam']
         args.class_num = 10
+    if args.dset == 'cardiomegaly':
+        names = ['chexpert', 'mimic']
+        args.class_num = 2
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
     SEED = args.seed
     torch.manual_seed(SEED)
     torch.cuda.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
     np.random.seed(SEED)
     random.seed(SEED)
     # torch.backends.cudnn.deterministic = True
@@ -352,6 +404,7 @@ if __name__ == "__main__":
     folder = './data/'
     args.s_dset_path = folder + args.dset + '/' + names[args.s] + '_list.txt'
     args.test_dset_path = folder + args.dset + '/' + names[args.t] + '_list.txt'     
+    print('Source', names[args.s], 'Target', names[args.t])
 
     if args.dset == 'office-home':
         if args.da == 'pda':
@@ -377,12 +430,12 @@ if __name__ == "__main__":
 
     args.out_file = open(osp.join(args.output_dir_src, 'log_test.txt'), 'w')
     for i in range(len(names)):
-        if i == args.s:
-            continue
+        #if i == args.s:
+        #    continue
         args.t = i
         args.name = names[args.s][0].upper() + names[args.t][0].upper()
 
-        folder = '/Checkpoint/liangjian/tran/data/'
+        folder = './data/'
         args.s_dset_path = folder + args.dset + '/' + names[args.s] + '_list.txt'
         args.test_dset_path = folder + args.dset + '/' + names[args.t] + '_list.txt'
 

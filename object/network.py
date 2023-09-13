@@ -88,6 +88,7 @@ class feat_bottleneck(nn.Module):
             x = self.bn(x)
         return x
 
+'''
 class feat_classifier(nn.Module):
     def __init__(self, class_num, bottleneck_dim=256, type="linear"):
         super(feat_classifier, self).__init__()
@@ -102,6 +103,29 @@ class feat_classifier(nn.Module):
     def forward(self, x):
         x = self.fc(x)
         return x
+'''
+
+
+class feat_bootleneck(nn.Module):
+    def __init__(self, feature_dim, bottleneck_dim=256, type="ori"):
+        super(feat_bootleneck, self).__init__()
+        self.bn = nn.BatchNorm1d(bottleneck_dim, affine=True)
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout(p=0.5)
+        self.bottleneck = nn.Linear(feature_dim, bottleneck_dim)
+        self.bottleneck.apply(init_weights)
+        self.type = type
+
+    def forward(self, x):
+        x = self.bottleneck(x)
+        if self.type == "bn" or self.type == "bn_relu" or self.type == "bn_relu_drop":
+            x = self.bn(x)
+        if self.type == "bn_relu" or self.type == "bn_relu_drop":
+            x = self.relu(x)
+        if self.type == "bn_relu_drop":
+            x = self.dropout(x)
+        return x
+
 
 class feat_classifier_two(nn.Module):
     def __init__(self, class_num, input_dim, bottleneck_dim=256):
@@ -146,3 +170,37 @@ class Res50(nn.Module):
         x = x.view(x.size(0), -1)
         y = self.fc(x)
         return x, y
+
+class feat_classifier(nn.Module):
+    def __init__(self, class_num, bottleneck_dim=256, type="linear"):
+        super(feat_classifier, self).__init__()
+        self.type = type
+        if type == 'wn':
+            self.fc = weightNorm(nn.Linear(bottleneck_dim, class_num), name="weight")
+            self.fc.apply(init_weights)
+        elif type == 'linear':
+            self.fc = nn.Linear(bottleneck_dim, class_num)
+            self.fc.apply(init_weights)
+        else:
+            self.fc = nn.Linear(bottleneck_dim, class_num, bias=False)
+            nn.init.xavier_normal_(self.fc.weight)
+
+    def forward(self, x):
+        if not self.type in {'wn', 'linear'}:
+            w = self.fc.weight
+            w = torch.nn.functional.normalize(w, dim=1, p=2)
+            x = torch.nn.functional.normalize(x, dim=1, p=2)
+            x = torch.nn.functional.linear(x, w)
+        else:
+            x = self.fc(x)
+        return x
+
+class feat_classifier_simpl(nn.Module):
+    def __init__(self, class_num, feat_dim):
+        super(feat_classifier_simpl, self).__init__()
+        self.fc = nn.Linear(feat_dim, class_num)
+        nn.init.xavier_normal_(self.fc.weight)
+
+    def forward(self, x):
+        x = self.fc(x)
+        return x
