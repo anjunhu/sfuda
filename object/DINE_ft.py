@@ -79,9 +79,9 @@ def data_load(args):
     print("target_te", len(txt_tar_te))
     print("test", len(txt_tar_te))
 
-    dsets["test"] = ImageList_idx(txt_test, transform=image_test())
-    dsets["target_tr"] = ImageList_idx(txt_tar_tr, transform=image_train())
-    dsets["target_te"] = ImageList(txt_tar_te, transform=image_test())
+    dsets["test"] = ImageList_idx(txt_test, root_dir=f'./data/{args.dset}/', transform=image_test())
+    dsets["target_tr"] = ImageList_idx(txt_tar_tr, root_dir=f'./data/{args.dset}/', transform=image_train())
+    dsets["target_te"] = ImageList(txt_tar_te, root_dir=f'./data/{args.dset}/', transform=image_test())
 
     train_sampler = None
     test_sampler = None
@@ -127,7 +127,7 @@ def cal_acc(loader, netF, netB, netC, flag=False):
                 all_sensitives =  torch.cat((all_sensitives, sensitives.float().cpu()), 0)
 
     print('\nEval Y0/Y1', all_output[all_label.squeeze()==0].shape, all_output[all_label.squeeze()==1].shape)
-    for sa in range(5):
+    for sa in range(args.sens_classes):
         print(f'A{sa} Total/Y0/Y1:', all_output[all_sensitives.squeeze()==sa].shape,
                     all_output[torch.logical_and((all_sensitives.squeeze()==sa),(all_label.squeeze()==0))].shape,
                     all_output[torch.logical_and((all_sensitives.squeeze()==sa),(all_label.squeeze()==1))].shape)
@@ -136,16 +136,16 @@ def cal_acc(loader, netF, netB, netC, flag=False):
     accuracy = torch.sum(torch.squeeze(predict).float() == all_label).item() / float(all_label.size()[0])
     mean_ent = torch.mean(loss.Entropy(nn.Softmax(dim=1)(all_output))).cpu().data.item()
     auc = calculate_auc(F.softmax(all_output, dim=1)[:, 1], all_label.cpu())
-    for sa in range(5):
+    for sa in range(args.sens_classes):
         output_sa = all_output[all_sensitives.squeeze()==sa]
         labels_sa = all_label[all_sensitives.squeeze()==sa]
         group_metrics[f'acc A{sa}'] = accuracy_score(labels_sa.to('cpu'), output_sa.to('cpu').max(1)[1])
         group_metrics[f'auc A{sa}'] = calculate_auc(F.softmax(output_sa, dim=1)[:, 1].detach().cpu(), labels_sa.to('cpu'))
         group_metrics[f'entropy A{sa}'] = -(output_sa.softmax(1) * output_sa.log_softmax(1)).sum(1).mean(0).item()
+    group_metrics.update({'auc': auc, 'acc': accuracy, 'mean_ent': mean_ent})
     pprint(group_metrics)
 
     if args.wandb:
-        wandb.log({'auc': auc, 'acc': accuracy, 'mean_ent': mean_ent})
         wandb.log(group_metrics)
 
     if flag:
@@ -287,16 +287,20 @@ if __name__ == "__main__":
     parser.add_argument('--test_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
     parser.add_argument('--flag', default='', choices=['', 'Younger', 'Older'], type=str, help='')
     parser.add_argument('--wandb', action='store_true', help="Use wandb")
+    parser.add_argument('--sens_classes', type=int, default=5, help="number of sensitive classes")
 
     args = parser.parse_args()
     if args.dset == 'office-home':
         names = ['Art', 'Clipart', 'Product', 'RealWorld']
-        args.class_num = 65 
+        args.class_num = 65
     if args.dset == 'cardiomegaly':
         names = ['chexpert', 'mimic']
         args.class_num = 2
+    if args.dset == 'VISDA-C':
+        names = ['train', 'validation']
+        args.class_num = 12
 
-    run_name = ''.join(['FT_', names[args.s][0].upper(), '2', args.flag, names[args.t][0].upper()])
+    run_name = ''.join(['FT_', args.dset, '_', names[args.s][0].upper(), '2', args.flag, names[args.t][0].upper()])
     if args.wandb:
         wandb.init(project=args.proj_name, name=run_name, config=args)
 
@@ -309,10 +313,10 @@ if __name__ == "__main__":
     # torch.backends.cudnn.deterministic = True
 
     folder = './data/'
-    for i in range(len(names)):
+    for i in range(1): #range(len(names)):
         #if i == args.s:
         #    continue
-        args.t = i
+        #args.t = i
         args.s_dset_path = folder + args.dset + '/' + names[args.s] + '_list.txt'
         args.t_dset_path = folder + args.dset + '/' + names[args.t] + '_list.txt'
         args.test_dset_path = folder + args.dset + '/' + names[args.t] + '_list.txt'

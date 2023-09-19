@@ -11,12 +11,16 @@ import torchvision
 def make_dataset(image_list, labels):
     len_ = len(image_list)
     if labels:
-      images = [(image_list[i].strip(), labels[i, :]) for i in range(len_)]
+        images = [(image_list[i].strip(), labels[i, :]) for i in range(len_)]
     else:
-      if len(image_list[0].split()) > 2:
-        images = [(val.split()[0], int(val.split()[1]), int(val.split()[2])) for val in image_list]
+        #print(image_list)
         labels = [int(val.split()[1]) for val in image_list]
-        sensitives = [int(val.split()[2]) for val in image_list]
+        if len(image_list[0].split()) > 2:
+            images = [(val.split()[0], int(val.split()[1]), int(val.split()[2])) for val in image_list]
+            sensitives = [int(val.split()[2]) for val in image_list]
+        else:
+            images = [(val.split()[0], int(val.split()[1]), 0) for val in image_list]
+            sensitives = [0 for val in image_list]
     return images, labels, sensitives
 
 
@@ -31,8 +35,14 @@ def l_loader(path):
             return img.convert('L')
 
 class ImageList(Dataset):
-    def __init__(self, image_list, labels=None, transform=None, target_transform=None, mode='RGB'):
+    def __init__(self, image_list, root_dir, labels=None, transform=None, target_transform=None, mode='RGB', pseudo_item_list=None):
         imgs, self.labels, self.sensitives = make_dataset(image_list, labels)
+        self.root_dir = root_dir
+        # self.item_list = (img_path, label, img_file)
+        if pseudo_item_list:
+            self.item_list = pseudo_item_list
+        else:
+            self.item_list = [(os.path.join(root_dir, val[0]), int(val[1]), val[0]) for val in imgs]
         if len(imgs) == 0:
             raise(RuntimeError("Found 0 images in subfolders of: " + root + "\n"
                                "Supported image extensions are: " + ",".join(IMG_EXTENSIONS)))
@@ -48,7 +58,7 @@ class ImageList(Dataset):
 
     def __getitem__(self, index):
         path, target, sensitive = self.imgs[index]
-        img = self.loader(os.path.join('./data/cardiomegaly/', path))
+        img = self.loader(os.path.join(self.root_dir, path))
         if self.transform is not None:
             img = self.transform(img)
         if self.target_transform is not None:
@@ -105,8 +115,13 @@ class ImageList(Dataset):
 
 
 class ImageList_idx(Dataset):
-    def __init__(self, image_list, labels=None, transform=None, target_transform=None, mode='RGB'):
+    def __init__(self, image_list, root_dir, labels=None, transform=None, target_transform=None, mode='RGB', pseudo_item_list=None):
         imgs, self.labels, self.sensitives = make_dataset(image_list, labels)
+        self.root_dir = root_dir
+        if pseudo_item_list:
+            self.item_list = pseudo_item_list
+        else:
+            self.item_list = [(os.path.join(root_dir, val[0]), int(val[1]), val[0]) for val in imgs]
         if len(imgs) == 0:
             raise(RuntimeError("Found 0 images in subfolders of: " + root + "\n"
                                "Supported image extensions are: " + ",".join(IMG_EXTENSIONS)))
@@ -121,7 +136,7 @@ class ImageList_idx(Dataset):
 
     def __getitem__(self, index):
         path, target, sensitive = self.imgs[index]
-        img = self.loader(os.path.join('./data/cardiomegaly/', path))
+        img = self.loader(os.path.join(self.root_dir, path))
         if self.transform is not None:
             img = self.transform(img)
         if self.target_transform is not None:

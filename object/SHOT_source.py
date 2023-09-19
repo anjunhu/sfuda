@@ -70,6 +70,22 @@ def data_load(args):
     txt_src = open(args.s_dset_path).readlines()
     txt_test = open(args.test_dset_path).readlines()
 
+    if args.dset == 'office-home':
+        names = ['Art', 'Clipart', 'Product', 'RealWorld']
+        args.class_num = 65
+    if args.dset == 'office':
+        names = ['amazon', 'dslr', 'webcam']
+        args.class_num = 31
+    if args.dset == 'VISDA-C':
+        names = ['train', 'validation'] 
+        args.class_num = 12
+    if args.dset == 'office-caltech':
+        names = ['amazon', 'caltech', 'dslr', 'webcam']
+        args.class_num = 10 
+    if args.dset == 'cardiomegaly':
+        names = ['chexpert', 'mimic']
+        args.class_num = 2
+
     if not args.da == 'uda':
         label_map_s = {}
         for i in range(len(args.src_classes)):
@@ -107,9 +123,9 @@ def data_load(args):
         _, te_txt = torch.utils.data.random_split(txt_src, [tr_size, dsize - tr_size], generator=torch.Generator().manual_seed(0))
         tr_txt = txt_src
 
-    dsets["source_tr"] = ImageList(tr_txt, transform=image_train())
-    dsets["source_te"] = ImageList(te_txt, transform=image_test())
-    dsets["test"] = ImageList(txt_test, transform=image_test())
+    dsets["source_tr"] = ImageList(tr_txt, root_dir=f'./data/{args.dset}/', transform=image_train())
+    dsets["source_te"] = ImageList(te_txt, root_dir=f'./data/{args.dset}/', transform=image_test())
+    dsets["test"] = ImageList(txt_test, root_dir=f'./data/{args.dset}/', transform=image_test())
     source_tr_sampler = None
     source_te_sampler = None
     test_sampler = None
@@ -153,7 +169,7 @@ def cal_acc(loader, netF, netB, netC, flag=False):
                 all_sensitives =  torch.cat((all_sensitives, sensitives.float().cpu()), 0)
 
     print('\nEval Y0/Y1', all_output[all_label.squeeze()==0].shape, all_output[all_label.squeeze()==1].shape)
-    for sa in range(5):
+    for sa in range(args.sens_classes):
         print(f'A{sa} Total/Y0/Y1:', all_output[all_sensitives.squeeze()==sa].shape,
                     all_output[torch.logical_and((all_sensitives.squeeze()==sa),(all_label.squeeze()==0))].shape,
                     all_output[torch.logical_and((all_sensitives.squeeze()==sa),(all_label.squeeze()==1))].shape)
@@ -162,7 +178,7 @@ def cal_acc(loader, netF, netB, netC, flag=False):
     accuracy = torch.sum(torch.squeeze(predict).float() == all_label).item() / float(all_label.size()[0])
     mean_ent = torch.mean(loss.Entropy(nn.Softmax(dim=1)(all_output))).cpu().data.item()
     auc = calculate_auc(F.softmax(all_output, dim=1)[:, 1], all_label.cpu())
-    for sa in range(5):
+    for sa in range(args.sens_classes):
         output_sa = all_output[all_sensitives.squeeze()==sa]
         labels_sa = all_label[all_sensitives.squeeze()==sa]
         group_metrics[f'acc A{sa}'] = accuracy_score(labels_sa.to('cpu'), output_sa.to('cpu').max(1)[1])
@@ -370,6 +386,7 @@ if __name__ == "__main__":
     parser.add_argument('--proj_name', type=str, default='SHOT')
     parser.add_argument('--train_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
     parser.add_argument('--test_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
+    parser.add_argument('--sens_classes', type=int, default=5, help="number of sensitive classes")
     parser.add_argument('--wandb', action='store_true', help="Use wandb")
     args = parser.parse_args()
 

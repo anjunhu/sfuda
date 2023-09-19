@@ -95,8 +95,8 @@ def data_load(args):
 
     txt_test = txt_tar
 
-    dsets["target"] = ImageList_idx(txt_tar, transform=image_train())
-    dsets["test"] = ImageList_idx(txt_test, transform=image_test())
+    dsets["target"] = ImageList_idx(txt_tar, root_dir=f'./data/{args.dset}', transform=image_train())
+    dsets["test"] = ImageList_idx(txt_test, root_dir=f'./data/{args.dset}', transform=image_test())
 
     train_sampler = None
     test_sampler = None
@@ -114,14 +114,14 @@ def data_load(args):
 
     return dset_loaders
 
-def cal_acc(loader, netF, netB, netC, args, flag=False):
+def cal_acc(loader, netF, netB, netC, args, flag=False, full=False):
     start_test = True
     group_metrics = {}
 
     with torch.no_grad():
         iter_test = iter(loader)
-        #print(len(loader))
-        for i in range(20):  #range(len(loader)):
+        batches = len(loader) if full else min(20, len(loader))
+        for i in range(batches):
             data = next(iter_test)
             inputs = data[0]
             labels = data[1]
@@ -162,7 +162,7 @@ def cal_acc(loader, netF, netB, netC, args, flag=False):
                 all_sensitives =  torch.cat((all_sensitives, sensitives.float().cpu()), 0)
 
     print('\nEval Y0/Y1', all_output[all_label.squeeze()==0].shape, all_output[all_label.squeeze()==1].shape)
-    for sa in range(5):
+    for sa in range(args.sens_classes):
         print(f'A{sa} Total/Y0/Y1:', all_output[all_sensitives.squeeze()==sa].shape,
                     all_output[torch.logical_and((all_sensitives.squeeze()==sa),(all_label.squeeze()==0))].shape,
                     all_output[torch.logical_and((all_sensitives.squeeze()==sa),(all_label.squeeze()==1))].shape)
@@ -171,7 +171,7 @@ def cal_acc(loader, netF, netB, netC, args, flag=False):
     accuracy = torch.sum(torch.squeeze(predict).float() == all_label).item() / float(all_label.size()[0])
     mean_ent = torch.mean(loss.Entropy(nn.Softmax(dim=1)(all_output))).cpu().data.item()
     auc = calculate_auc(F.softmax(all_output, dim=1)[:, 1], all_label.cpu())
-    for sa in range(5):
+    for sa in range(args.sens_classes):
         output_sa = all_output[all_sensitives.squeeze()==sa]
         labels_sa = all_label[all_sensitives.squeeze()==sa]
         group_metrics[f'cls_loss A{sa}'] = (all_classifier_losses[all_sensitives.squeeze()==sa]).mean().item()
@@ -238,10 +238,10 @@ def train_target(args):
     netF.eval()
     netB.eval()
     if args.dset=='VISDA-C':
-        acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, args, True)
+        acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, args, True, True)
         log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name, iter_num, max_iter, acc_s_te) + '\n' + acc_list
     else:
-        acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, args, False)
+        acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, args, False, True)
         log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name, iter_num, max_iter, acc_s_te)
 
     args.out_file.write(log_str + '\n')
@@ -287,6 +287,9 @@ def train_target(args):
         else:
             classifier_loss = torch.tensor(0.0).cuda()
 
+        if args.wandb:
+            wandb.log({'classifier_loss': classifier_loss})
+
         if args.ent:
             softmax_out = nn.Softmax(dim=1)(outputs_test)
             entropy_loss = torch.mean(loss.Entropy(softmax_out))
@@ -302,7 +305,7 @@ def train_target(args):
         optimizer.step()
 
         if args.wandb:
-            wandb.log({'classifier_loss': classifier_loss})
+            wandb.log({'entropy_loss': entropy_loss})
 
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()
@@ -432,6 +435,7 @@ if __name__ == "__main__":
     parser.add_argument('--train_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
     parser.add_argument('--test_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
     parser.add_argument('--flag', default='', choices=['', 'Younger', 'Older'], type=str, help='')
+    parser.add_argument('--sens_classes', type=int, default=5, help="number of sensitive classes")
 
     args = parser.parse_args()
 
