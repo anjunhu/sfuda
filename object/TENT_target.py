@@ -60,7 +60,25 @@ def image_test(resize_size=256, crop_size=224, alexnet=False):
         normalize
     ])
 
-def data_load(args): 
+def collect_params(model):
+    """Collect the affine scale + shift parameters from batch norms.
+
+    Walk the model's modules and collect all batch normalization parameters.
+    Return the parameters and their names.
+
+    Note: other choices of parameterization are possible!
+    """
+    params = []
+    names = []
+    for nm, m in model.named_modules():
+        if isinstance(m, nn.BatchNorm2d):
+            for np, p in m.named_parameters():
+                if np in ['weight', 'bias']:  # weight is scale, bias is shift
+                    params.append(p)
+                    names.append(f"{nm}.{np}")
+    return params, names
+
+def data_load(args):
     ## prepare data
     dsets = {}
     dset_loaders = {}
@@ -210,21 +228,32 @@ def train_target(args):
     netB.load_state_dict(torch.load(modelpath))
     modelpath = args.output_dir_src + '/source_C.pt'    
     netC.load_state_dict(torch.load(modelpath))
-    netC.eval()
-    for k, v in netC.named_parameters():
-        v.requires_grad = False
 
     param_group = []
-    for k, v in netF.named_parameters():
-        if args.lr_decay1 > 0:
-            param_group += [{'params': v, 'lr': args.lr * args.lr_decay1}]
-        else:
-            v.requires_grad = False
-    for k, v in netB.named_parameters():
-        if args.lr_decay2 > 0:
-            param_group += [{'params': v, 'lr': args.lr * args.lr_decay2}]
-        else:
-            v.requires_grad = False
+
+    for nm, m in netF.named_modules():
+        if isinstance(m, nn.BatchNorm2d) and args.lr_decay1 > 0:
+            for np, p in m.named_parameters():
+                if np in ['weight', 'bias']:
+                    param_group += [{'params': p, 'lr': args.lr * args.lr_decay1}]
+                else:
+                    p.requires_grad = False
+
+    for nm, m in netC.named_modules():
+        if isinstance(m, nn.BatchNorm2d) and args.lr_decay1 > 0:
+            for np, p in m.named_parameters():
+                if np in ['weight', 'bias']:
+                    param_group += [{'params': p, 'lr': args.lr * args.lr_decay1}]
+                else:
+                    p.requires_grad = False
+
+    for k, v in netB.named_modules():
+        if isinstance(m, nn.BatchNorm2d) and args.lr_decay2 > 0:
+            for np, p in m.named_parameters():
+                if np in ['weight', 'bias']:
+                    param_group += [{'params': p, 'lr': args.lr * args.lr_decay2}]
+                else:
+                    p.requires_grad = False
 
     optimizer = optim.SGD(param_group)
     optimizer = op_copy(optimizer)
@@ -399,7 +428,7 @@ def obtain_label(loader, netF, netB, netC, args, verbose=True):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='SHOT')
+    parser = argparse.ArgumentParser(description='TENT')
     parser.add_argument('--gpu_id', type=str, nargs='?', default='0', help="device id to run")
     parser.add_argument('--s', type=int, default=0, help="source")
     parser.add_argument('--t', type=int, default=1, help="target")
@@ -411,11 +440,11 @@ if __name__ == "__main__":
     parser.add_argument('--lr', type=float, default=1e-2, help="learning rate")
     parser.add_argument('--net', type=str, default='resnet50', help="alexnet, vgg16, resnet50, res101")
     parser.add_argument('--seed', type=int, default=2020, help="random seed")
- 
+
     parser.add_argument('--gent', action='store_true')
     parser.add_argument('--ent', type=bool, default=True)
     parser.add_argument('--threshold', type=int, default=0)
-    parser.add_argument('--cls_par', type=float, default=0.3)
+    parser.add_argument('--cls_par', type=float, default=0.0)
     parser.add_argument('--ent_par', type=float, default=1.0)
     parser.add_argument('--lr_decay1', type=float, default=0.1)
     parser.add_argument('--lr_decay2', type=float, default=1.0)
@@ -425,13 +454,12 @@ if __name__ == "__main__":
     parser.add_argument('--layer', type=str, default="wn", choices=["linear", "wn"])
     parser.add_argument('--classifier', type=str, default="bn", choices=["ori", "bn"])
     parser.add_argument('--distance', type=str, default='cosine', choices=["euclidean", "cosine"])  
-    parser.add_argument('--output', type=str, default='ckps/SHOT/target')
-    parser.add_argument('--output_src', type=str, default='ckps/SHOT/source')
+    parser.add_argument('--output', type=str, default='ckps/TENT/target')
+    parser.add_argument('--output_src', type=str, default='ckps/TENT/source')
     parser.add_argument('--da', type=str, default='uda', choices=['uda', 'pda'])
     parser.add_argument('--issave', type=bool, default=True)
     parser.add_argument('--wandb', action='store_true', help="Use wandb")
-    parser.add_argument('--run_name', type=str, default='chexpert_source')
-    parser.add_argument('--proj_name', type=str, default='SHOT')
+    parser.add_argument('--proj_name', type=str, default='TENT')
     parser.add_argument('--train_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
     parser.add_argument('--test_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
     parser.add_argument('--flag', default='', choices=['', 'Younger', 'Older'], type=str, help='')
@@ -455,7 +483,7 @@ if __name__ == "__main__":
         names = ['chexpert', 'mimic']
         args.class_num = 2
 
-    run_name = ''.join(['SHOT_', args.dset, '_', names[args.s][0].upper(), '2', args.flag, names[args.t][0].upper()])
+    run_name = ''.join(['TENT_', args.dset, '_', names[args.s][0].upper(), '2', args.flag, names[args.t][0].upper()])
     if args.wandb:
         wandb.init(project=args.proj_name, name=run_name, config=args)
 

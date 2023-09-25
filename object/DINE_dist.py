@@ -469,8 +469,8 @@ if __name__ == "__main__":
         names = ['train', 'validation']
         args.class_num = 12
 
-    run_name = ''.join(['Distill_', args.dset, names[args.s][0].upper(), '2', args.flag, names[args.t][0].upper()]) if args.distill \
-           else ''.join(['Source_', args.dset, args.flag, names[args.t][0].upper()])
+    run_name = ''.join(['Distill_', args.dset, '_', names[args.s][0].upper(), '2', args.flag, names[args.t][0].upper()]) if args.distill \
+           else ''.join(['Source_', args.dset, '_', args.flag, names[args.s][0].upper()])
     if args.wandb:
         print('Running', run_name)
         wandb.init(project=args.proj_name, name=run_name, config=args)
@@ -488,7 +488,7 @@ if __name__ == "__main__":
     args.t_dset_path = folder + args.dset + '/' + names[args.t] + '_list.txt'
     args.test_dset_path = folder + args.dset + '/' + names[args.t] + '_list.txt'
 
-    args.output_dir_src = osp.join(args.output_src, args.net_src, str(args.seed), 'uda', args.dset, names[args.s][0].upper())
+    args.output_dir_src = osp.join(args.output_src, args.net_src, str(args.seed), 'uda', args.dset, names[args.s][0].upper(), args.net)
     args.name_src = names[args.s][0].upper()
     if not osp.exists(args.output_dir_src):
         os.system('mkdir -p ' + args.output_dir_src)

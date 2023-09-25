@@ -390,9 +390,6 @@ if __name__ == "__main__":
     parser.add_argument('--wandb', action='store_true', help="Use wandb")
     args = parser.parse_args()
 
-    if args.wandb:
-        wandb.init(project=args.proj_name, name=args.run_name, config=args)
-
     if args.dset == 'office-home':
         names = ['Art', 'Clipart', 'Product', 'RealWorld']
         args.class_num = 65
@@ -408,6 +405,11 @@ if __name__ == "__main__":
     if args.dset == 'cardiomegaly':
         names = ['chexpert', 'mimic']
         args.class_num = 2
+
+    run_name = '_'.join(['SHOT', 'Source', args.dset, names[args.s][0].upper()])
+    if args.wandb:
+        print('Running', run_name)
+        wandb.init(project=args.proj_name, name=run_name, config=args)
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
     SEED = args.seed
@@ -433,7 +435,7 @@ if __name__ == "__main__":
             args.src_classes = [i for i in range(25)]
             args.tar_classes = [i for i in range(65)]
 
-    args.output_dir_src = osp.join(args.output, args.da, args.dset, names[args.s][0].upper())
+    args.output_dir_src = osp.join(args.output, args.da, args.dset, names[args.s][0].upper(), args.net)
     args.name_src = names[args.s][0].upper()
     if not osp.exists(args.output_dir_src):
         os.system('mkdir -p ' + args.output_dir_src)

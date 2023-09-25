@@ -476,15 +476,31 @@ def instance_loss(logits_ins, pseudo_labels, mem_labels, contrast_type):
 
 def classification_loss(logits_w, logits_s, target_labels, args):
     if args.learn.ce_sup_type == "weak_weak":
-        loss_cls = cross_entropy_loss(logits_w, target_labels, args)
+        probs = F.softmax(logits_w, dim=1)
+        if args.learn.neg_l:
+            loss_cls = nl_criterion(logits_w, target_labels, args)
+        else:
+            loss_cls = cross_entropy_loss(logits_w, target_labels, args)
         accuracy = calculate_acc(logits_w, target_labels)
     elif args.learn.ce_sup_type == "weak_strong":
-        loss_cls = cross_entropy_loss(logits_s, target_labels, args)
+        probs = F.softmax(logits_s, dim=1)
+        if args.learn.neg_l:
+            loss_cls = nl_criterion(logits_s, target_labels, args)
+        else:
+            loss_cls = cross_entropy_loss(logits_s, target_labels, args)
         accuracy = calculate_acc(logits_s, target_labels)
     else:
         raise NotImplementedError(
             f"{args.learn.ce_sup_type} CE supervision type not implemented."
         )
+    if args.learn.reweight:
+        max_entropy = torch.log2(torch.tensor(args.model_src.num_classes))
+        w = entropy(probs)
+        w = w / max_entropy
+        w = torch.exp(-w)
+        loss_cls = (w * loss_cls).mean(0)
+    else:
+        loss_cls = loss_cls.mean(0)
     return loss_cls, accuracy
 
 
@@ -519,8 +535,12 @@ def smoothed_cross_entropy(logits, labels, num_classes, epsilon=0):
 
 def cross_entropy_loss(logits, labels, args):
     if args.learn.ce_type == "standard":
-        return F.cross_entropy(logits, labels)
+        return F.cross_entropy(logits, labels, reduction='none')
     raise NotImplementedError(f"{args.learn.ce_type} CE loss is not implemented.")
+
+
+def entropy(p, axis=1):
+    return -torch.sum(p * torch.log2(p+1e-5), dim=axis)
 
 
 def entropy_minimization(logits):
@@ -530,4 +550,26 @@ def entropy_minimization(logits):
     ents = -(probs * probs.log()).sum(dim=1)
 
     loss = ents.mean()
+    return loss
+
+
+'''
+Guiding-Pseudo-labels-with-Uncertainty-Estimation-for-Source-free-Unsupervised-Domain-Adaptation
+'''
+def nl_criterion(output, y, args):
+    output = torch.log( torch.clamp(1.-F.softmax(output, dim=1), min=1e-5, max=1.) )
+    labels_neg = ( (y.unsqueeze(-1).repeat(1, 1) + torch.LongTensor(len(y), 1).random_(1, args.model_src.num_classes).cuda()) % args.model_src.num_classes ).view(-1)
+    l = F.nll_loss(output, labels_neg, reduction='none')
+    return l
+
+def contrastive_loss(logits_ins, pseudo_labels, mem_labels):
+    # labels: positive key indicators
+    labels_ins = torch.zeros(logits_ins.shape[0], dtype=torch.long).cuda()
+
+    mask = torch.ones_like(logits_ins, dtype=torch.bool)
+    mask[:, 1:] = torch.all(pseudo_labels.unsqueeze(1) != mem_labels.unsqueeze(0), dim=2) 
+    logits_ins = torch.where(mask, logits_ins, torch.tensor([float("-inf")]).cuda())
+
+    loss = F.cross_entropy(logits_ins, labels_ins)
+
     return loss
