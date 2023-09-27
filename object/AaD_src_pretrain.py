@@ -225,7 +225,7 @@ def train_source(args):
         netF.eval()
         netB.eval()
         netC.eval()
-        if args.dset=='VISDA-C':
+        if True: #args.dset=='VISDA-C':
             acc_s_te, acc_list = cal_acc(dset_loaders['source_te'], netF, netB, netC, flag=True)
             log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name_src, iter_num, max_iter, acc_s_te) + '\n' + acc_list
         args.out_file.write(log_str + '\n')

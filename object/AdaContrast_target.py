@@ -88,7 +88,7 @@ def eval_and_label_dataset(dataloader, model, banks, args):
     wandb_dict["Test Acc"] = accuracy
     wandb_dict["Test AUC"] = auc
 
-    if args.data.dataset == "VISDA-C":
+    if True: # args.data.dataset == "VISDA-C":
         acc_per_class = per_class_accuracy(
             y_true=gt_labels.cpu().numpy(),
             y_pred=pred_labels.cpu().numpy(),
@@ -108,7 +108,7 @@ def eval_and_label_dataset(dataloader, model, banks, args):
         features, probs, banks, args=args, gt_labels=gt_labels
     )
     wandb_dict["Test Post Acc"] = acc
-    if args.data.dataset == "VISDA-C":
+    if True: #args.data.dataset == "VISDA-C":
         acc_per_class = per_class_accuracy(
             y_true=gt_labels.cpu().numpy(),
             y_pred=pred_labels.cpu().numpy(),
@@ -272,6 +272,7 @@ def train_target_domain(args):
         args.learn.queue_size = data_length
         del dummy_dataset
 
+    #args.model_tta.src_log_dir='/scratch/local/ssd/anjun/sfuda/SHOT/object/ckps/AdaContrast/VISDA-C/source/'
     checkpoint_path = os.path.join(
         args.model_tta.src_log_dir,
         f"best_{args.data.src_domain}_{args.seed}.pth.tar",

@@ -101,7 +101,7 @@ def data_load(args):
 
     return dset_loaders
 
-def cal_acc(loader, netF, netB, netC, flag=False):
+def cal_acc(loader, netF, netB, netC, flag=True):
     start_test = True
     group_metrics = {}
     with torch.no_grad():

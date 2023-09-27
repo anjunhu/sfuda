@@ -105,11 +105,11 @@ def main_worker(gpu, ngpus_per_node, args):
     # iterate over each domain
     args.data.image_root = os.path.join(args.data.data_root, args.data.dataset)
     args.model_src.num_classes = NUM_CLASSES[args.data.dataset]
+    pipeline = 'source' if args.train_source else 'target'
     if args.train_source:
         for src_domain in args.data.source_domains:
             args.data.src_domain = src_domain
-            pipeline = 'source' if args.train_source else 'target'
-            run_name = '_'.join(['AdaCon', pipeline, args.data.src_domains, args.data.target_domains])
+            run_name = '_'.join(['AdaCon', pipeline, src_domain])
             if use_wandb(args):
                 wandb.init(
                     project=args.project if args.project else args.data.dataset,
@@ -129,13 +129,13 @@ def main_worker(gpu, ngpus_per_node, args):
                 if src_domain == tgt_domain:
                     continue
                 args.data.tgt_domain = tgt_domain
-
+                run_name = '_'.join(['AdaCon', pipeline, src_domain, tgt_domain])
                 if use_wandb(args):
                     wandb.init(
                         project=args.project if args.project else args.data.dataset,
                         group=args.memo,
                         job_type=f"{src_domain}-{tgt_domain}-{args.sub_memo}",
-                        name=f"seed_{args.seed}",
+                        name=run_name,
                         config=dict(args),
                     )
                 # main loop

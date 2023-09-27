@@ -272,6 +272,15 @@ def train_target(args):
     netB.train()
     netC.train()
     acc_log=0
+
+
+    # Eval Pre-Adaptation Performance
+    acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC,flag=True)
+    log_str = 'Task: {}, Iter:{}/{}; Accuracy on target = {:.4f}'.format(
+                    args.name, iter_num, max_iter, acc_s_te
+                ) + '\n' +  acc_list
+
+
     while iter_num < max_iter:
         try:
             inputs_test, _, tar_idx, tar_sensitives = next(iter_test)
@@ -341,28 +350,39 @@ def train_target(args):
         # nn of nn
         output_re = softmax_out.unsqueeze(1).expand(-1, args.K * args.KK,
                                                     -1)  # batch x C x 1
-        const = torch.mean(
-            (F.kl_div(output_re, score_near_kk, reduction='none').sum(-1) *
-             weight_kk.cuda()).sum(1)) # kl_div here equals to dot product since we do not use log for score_near_kk
+        const = \
+             (F.kl_div(output_re, score_near_kk, reduction='none', log_target=True).sum(-1) *
+             weight_kk.cuda()).sum(1) # kl_div here equals to dot product since we do not use log for score_near_kk
         loss = torch.mean(const)
-
+        if args.wandb:
+            wandb.log({'loss_const': loss.item()})
+            for sa in range(args.sens_classes):
+                wandb.log({f'loss_const_A{sa}': torch.mean(const[tar_sensitives==sa])})
 
         # nn
         softmax_out_un = softmax_out.unsqueeze(1).expand(-1, args.K,
                                                          -1)  # batch x K x C
 
-        loss += torch.mean((
-            F.kl_div(softmax_out_un, score_near, reduction='none').sum(-1) *
-            weight.cuda()).sum(1))
+        loss_kl = (
+            F.kl_div(softmax_out_un, score_near, reduction='none', log_target=True).sum(-1) *
+            weight.cuda()).sum(1)
+        if args.wandb:
+            for sa in range(args.sens_classes):
+                wandb.log({f'loss_kl_A{sa}': torch.mean(loss_kl[tar_sensitives==sa])})
+            wandb.log({'loss_kl': loss_kl.mean().item()})
+        loss += loss_kl.mean()
 
         # self, if not explicitly removing the self feature in expanded neighbor then no need for this
         #loss += -torch.mean((softmax_out * score_self).sum(-1))
 
-
-        msoftmax = softmax_out.mean(dim=0)
-        gentropy_loss = torch.sum(msoftmax *
-                                    torch.log(msoftmax + args.epsilon))
-        loss += gentropy_loss
+        msoftmax = softmax_out
+        gentropy_loss = msoftmax * torch.log(msoftmax + args.epsilon)
+        loss += gentropy_loss.mean(0).sum()
+        if args.wandb:
+            wandb.log({'loss_gentropy': gentropy_loss.mean(0).sum().item()})
+            wandb.log({'loss': loss.item()})
+            for sa in range(args.sens_classes):
+                wandb.log({f'loss_gentropy_A{sa}': gentropy_loss[tar_sensitives==sa].mean(0).sum().item() })
 
         optimizer.zero_grad()
         optimizer_c.zero_grad()
@@ -370,17 +390,16 @@ def train_target(args):
         optimizer.step()
         optimizer_c.step()
 
-
         if iter_num % interval_iter == 0 or iter_num == max_iter:
             netF.eval()
             netB.eval()
             netC.eval()
             if True: #args.dset == 'VISDA-C':
                 acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB,
-                                             netC,flag= True)
+                                             netC,flag=True)
                 log_str = 'Task: {}, Iter:{}/{}; Accuracy on target = {:.4f}'.format(
                     args.name, iter_num, max_iter, acc_s_te
-                ) + '\n' + 'T: ' + acc_list
+                ) + '\n' + acc_list
 
             args.out_file.write(log_str + '\n')
             args.out_file.flush()
@@ -393,15 +412,15 @@ def train_target(args):
                 acc_log=acc_s_te
                 torch.save(
                     netF.state_dict(),
-                    osp.join(args.output_dir, "target_F_" + args.seed + '_' + str(args.K) + ".pt"))
+                    osp.join(args.output_dir, "target_F_" + str(args.seed) + '_' + str(args.K) + ".pt"))
                 torch.save(
                     netB.state_dict(),
                     osp.join(args.output_dir,
-                                "target_B_" + args.seed + '_' + str(args.K) + ".pt"))
+                                "target_B_" + str(args.seed) + '_' + str(args.K) + ".pt"))
                 torch.save(
                     netC.state_dict(),
                     osp.join(args.output_dir,
-                                "target_C_" + args.seed + '_' + str(args.K) + ".pt"))
+                                "target_C_" + str(args.seed) + '_' + str(args.K) + ".pt"))
 
 
     return netF, netB, netC

@@ -444,7 +444,6 @@ if __name__ == "__main__":
     parser.add_argument('--gent', action='store_true')
     parser.add_argument('--ent', type=bool, default=True)
     parser.add_argument('--threshold', type=int, default=0)
-    parser.add_argument('--cls_par', type=float, default=0.0)
     parser.add_argument('--ent_par', type=float, default=1.0)
     parser.add_argument('--lr_decay1', type=float, default=0.1)
     parser.add_argument('--lr_decay2', type=float, default=1.0)
@@ -466,6 +465,8 @@ if __name__ == "__main__":
     parser.add_argument('--sens_classes', type=int, default=5, help="number of sensitive classes")
 
     args = parser.parse_args()
+
+    args.cls_par = 0.0 # TENT!
 
     if args.dset == 'office-home':
         names = ['Art', 'Clipart', 'Product', 'RealWorld']

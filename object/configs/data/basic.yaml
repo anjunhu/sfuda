@@ -1,0 +1,13 @@
+data_root: "data/"
+dataset: "VISDA-C"
+train_ratio: 0.8      # ratio of training data used in source training
+source_domains:
+  - "train"
+target_domains:
+  - "validation"
+pl_list: null         # cached initial pseudo labels to save time
+aug_type: "moco-v2"   # used in TTA contrastive learning
+
+batch_size: 32
+workers: 4
+sens_classes: 5

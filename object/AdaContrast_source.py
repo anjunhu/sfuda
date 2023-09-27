@@ -275,7 +275,7 @@ def evaluate(val_loader, model, domain, args, wandb_commit=True):
         wandb_dict[f"{domain} AUC A{sa}"] = calculate_auc(all_probs_sa[:, 1], gt_labels_sa.cpu())
 
     logging.info(f"Accuracy: {accuracy:.4f} \t AUC: {auc:.4f}")
-    if args.data.dataset == "VISDA-C":
+    if True: #args.data.dataset == "VISDA-C":
         acc_per_class = per_class_accuracy(
             y_true=gt_labels.numpy(), y_pred=all_preds.numpy()
         )
