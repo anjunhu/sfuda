@@ -123,18 +123,22 @@ def data_load(args):
         _, te_txt = torch.utils.data.random_split(txt_src, [tr_size, dsize - tr_size], generator=torch.Generator().manual_seed(0))
         tr_txt = txt_src
 
-    dsets["source_tr"] = ImageList(tr_txt, root_dir=f'./data/{args.dset}/', transform=image_train())
-    dsets["source_te"] = ImageList(te_txt, root_dir=f'./data/{args.dset}/', transform=image_test())
-    dsets["test"] = ImageList(txt_test, root_dir=f'./data/{args.dset}/', transform=image_test())
+    dsets["source_tr"] = ImageList(tr_txt, root_dir=f'./data/{args.dset}/', transform=image_train(), attribute=args.sens_name)
+    dsets["source_te"] = ImageList(te_txt, root_dir=f'./data/{args.dset}/', transform=image_test(), attribute=args.sens_name)
+    dsets["test"] = ImageList(txt_test, root_dir=f'./data/{args.dset}/', transform=image_test(), attribute=args.sens_name)
+
+    for key in dsets:
+        print('{} dataset size {}'.format(key, len(dsets[key]) ) )
+
     source_tr_sampler = None
     source_te_sampler = None
     test_sampler = None
     g = torch.Generator()
     g.manual_seed(0)
-    if args.train_resampling:
+    if args.train_resampling and args.train_resampling != 'natural':
         weights = dsets["source_tr"].get_weights(args.train_resampling)
         source_tr_sampler = WeightedRandomSampler(weights, len(weights), replacement=True, generator=g)
-    if args.test_resampling:
+    if args.test_resampling and args.test_resampling != 'natural':
         weights = dsets["source_te"].get_weights(args.test_resampling)
         source_te_sampler = WeightedRandomSampler(weights, len(weights), replacement=True, generator=g)
         test_weights = dsets["test"].get_weights(args.test_resampling)
@@ -178,26 +182,28 @@ def cal_acc(loader, netF, netB, netC, flag=False):
     accuracy = torch.sum(torch.squeeze(predict).float() == all_label).item() / float(all_label.size()[0])
     mean_ent = torch.mean(loss.Entropy(nn.Softmax(dim=1)(all_output))).cpu().data.item()
     auc = calculate_auc(F.softmax(all_output, dim=1)[:, 1], all_label.cpu())
+    ece = expected_calibration_error(F.softmax(all_output, dim=1)[:, 1].cpu().numpy(), all_label.cpu())
     for sa in range(args.sens_classes):
         output_sa = all_output[all_sensitives.squeeze()==sa]
         labels_sa = all_label[all_sensitives.squeeze()==sa]
         group_metrics[f'acc A{sa}'] = accuracy_score(labels_sa.to('cpu'), output_sa.to('cpu').max(1)[1])
         group_metrics[f'auc A{sa}'] = calculate_auc(F.softmax(output_sa, dim=1)[:, 1].detach().cpu(), labels_sa.to('cpu'))
         group_metrics[f'entropy A{sa}'] = -(output_sa.softmax(1) * output_sa.log_softmax(1)).sum(1).mean(0).item()
+        group_metrics[f'ece A{sa}'] = expected_calibration_error(output_sa.softmax(1)[:, 1].detach().cpu().numpy(),  labels_sa.cpu())
+    group_metrics.update({'auc': auc, 'acc': accuracy, 'mean_ent': mean_ent, 'ece': ece})
     pprint(group_metrics)
 
     if args.wandb:
-        wandb.log({'auc': auc, 'acc': accuracy, 'mean_ent': mean_ent})
-        wandb.log(group_metrics)
+        wandb.log(group_metrics, commit=False)
     if flag:
         matrix = confusion_matrix(all_label, torch.squeeze(predict).float())
         acc = matrix.diagonal()/matrix.sum(axis=1) * 100
         aacc = acc.mean()
         aa = [str(np.round(i, 2)) for i in acc]
         acc = ' '.join(aa)
-        return aacc, acc
+        return aacc, acc, group_metrics
     else:
-        return accuracy, mean_ent
+        return accuracy, mean_ent, group_metrics
 
 def cal_acc_oda(loader, netF, netB, netC):
     start_test = True
@@ -258,7 +264,6 @@ def train_source(args):
     optimizer = optim.SGD(param_group)
     optimizer = op_copy(optimizer)
 
-    acc_init = 0
     max_iter = args.max_epoch * len(dset_loaders["source_tr"])
     interval_iter = max_iter // 100
     iter_num = 0
@@ -266,6 +271,9 @@ def train_source(args):
     netF.train()
     netB.train()
     netC.train()
+
+    acc_s_te, acc_list, best_metric = cal_acc(dset_loaders['source_te'], netF, netB, netC, True)
+    log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name_src, iter_num, max_iter, acc_s_te) + '\n' + acc_list
 
     while iter_num < max_iter:
         try:
@@ -282,42 +290,42 @@ def train_source(args):
 
         inputs_source, labels_source = inputs_source.cuda(), labels_source.cuda()
         outputs_source = netC(netB(netF(inputs_source)))
-        classifier_loss = CrossEntropyLabelSmooth(num_classes=args.class_num, epsilon=args.smooth)(outputs_source, labels_source)            
+        classifier_loss = CrossEntropyLabelSmooth(num_classes=args.class_num, epsilon=args.smooth)(outputs_source, labels_source)
 
         optimizer.zero_grad()
         classifier_loss.backward()
         optimizer.step()
 
         if args.wandb:
-            wandb.log({'classifier_loss': classifier_loss})
+            wandb.log({'classifier_loss': classifier_loss}, commit=False)
         if iter_num % interval_iter == 1 or iter_num == max_iter:
             netF.eval()
             netB.eval()
             netC.eval()
-            if args.dset=='VISDA-C':
-                acc_s_te, acc_list = cal_acc(dset_loaders['source_te'], netF, netB, netC, True)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name_src, iter_num, max_iter, acc_s_te) + '\n' + acc_list
-            else:
-                acc_s_te, _ = cal_acc(dset_loaders['source_te'], netF, netB, netC, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name_src, iter_num, max_iter, acc_s_te)
+            acc_s_te, acc_list, group_metrics = cal_acc(dset_loaders['source_te'], netF, netB, netC, True)
+            log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name_src, iter_num, max_iter, acc_s_te) + '\n' + acc_list
             args.out_file.write(log_str + '\n')
             args.out_file.flush()
             print(log_str+'\n')
             if args.wandb:
                 wandb.log({'acc_s_te': acc_s_te})
-            if acc_s_te >= acc_init:
-                acc_init = acc_s_te
+            if  group_metrics['auc'] >= best_metric['auc']: #acc_s_te >= best_metric:
+                best_metric = group_metrics
                 best_netF = netF.state_dict()
                 best_netB = netB.state_dict()
                 best_netC = netC.state_dict()
-                torch.save(best_netF, osp.join(args.output_dir_src, "source_F.pt"))
-                torch.save(best_netB, osp.join(args.output_dir_src, "source_B.pt"))
-                torch.save(best_netC, osp.join(args.output_dir_src, "source_C.pt"))
+                torch.save(best_netF, osp.join(args.output_dir_src, f"{args.train_resampling[0].upper()}{args.test_resampling[0].upper()}_source_F.pt"))
+                torch.save(best_netB, osp.join(args.output_dir_src, f"{args.train_resampling[0].upper()}{args.test_resampling[0].upper()}_source_B.pt"))
+                torch.save(best_netC, osp.join(args.output_dir_src, f"{args.train_resampling[0].upper()}{args.test_resampling[0].upper()}_source_C.pt"))
 
             netF.train()
             netB.train()
             netC.train()
 
+    print('*'*20 + 'Source Domain Best Metrics' + '*'*20)
+    pprint(best_metric)
+    for key in best_metric:
+        wandb.log({f'Best {key}' : best_metric[key]}, commit=False)
     return netF, netB, netC
 
 def test_target(args):
@@ -330,12 +338,12 @@ def test_target(args):
 
     netB = network.feat_bottleneck(type=args.classifier, feature_dim=netF.in_features, bottleneck_dim=args.bottleneck).cuda()
     netC = network.feat_classifier(type=args.layer, class_num = args.class_num, bottleneck_dim=args.bottleneck).cuda()
-    
-    args.modelpath = args.output_dir_src + '/source_F.pt'   
+
+    args.modelpath = args.output_dir_src + f'/{args.train_resampling[0].upper()}{args.test_resampling[0].upper()}_source_F.pt'   
     netF.load_state_dict(torch.load(args.modelpath))
-    args.modelpath = args.output_dir_src + '/source_B.pt'   
+    args.modelpath = args.output_dir_src + f'/{args.train_resampling[0].upper()}{args.test_resampling[0].upper()}_source_B.pt'   
     netB.load_state_dict(torch.load(args.modelpath))
-    args.modelpath = args.output_dir_src + '/source_C.pt'   
+    args.modelpath = args.output_dir_src + f'/{args.train_resampling[0].upper()}{args.test_resampling[0].upper()}_source_C.pt'   
     netC.load_state_dict(torch.load(args.modelpath))
     netF.eval()
     netB.eval()
@@ -345,13 +353,10 @@ def test_target(args):
         acc_os1, acc_os2, acc_unknown = cal_acc_oda(dset_loaders['test'], netF, netB, netC)
         log_str = '\nTraining: {}, Task: {}, Accuracy = {:.4f} / {:.4f} / {:.4f}'.format(args.trte, args.name, acc_os2, acc_os1, acc_unknown)
     else:
-        if args.dset=='VISDA-C':
-            acc, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, True)
-            log_str = '\nTraining: {}, Task: {}, Accuracy = {:.4f}'.format(args.trte, args.name, acc) + '\n' + acc_list
-        else:
-            acc, _ = cal_acc(dset_loaders['test'], netF, netB, netC, False)
-            log_str = '\nTraining: {}, Task: {}, Accuracy = {:.4f}'.format(args.trte, args.name, acc)
-
+        acc, acc_list, group_metrics = cal_acc(dset_loaders['test'], netF, netB, netC, True)
+        log_str = '\nTraining: {}, Task: {}, Accuracy = {:.4f}'.format(args.trte, args.name, acc) + '\n' + acc_list
+    print('*'*20 + 'Target Domain Best Metrics' + '*'*20)
+    pprint(group_metrics)
     args.out_file.write(log_str)
     args.out_file.flush()
     print(log_str)
@@ -367,7 +372,7 @@ if __name__ == "__main__":
     parser.add_argument('--gpu_id', type=str, nargs='?', default='0', help="device id to run")
     parser.add_argument('--s', type=int, default=0, help="source")
     parser.add_argument('--t', type=int, default=1, help="target")
-    parser.add_argument('--max_epoch', type=int, default=20, help="max iterations")
+    parser.add_argument('--max_epoch', type=int, default=10, help="max iterations")
     parser.add_argument('--batch_size', type=int, default=64, help="batch_size")
     parser.add_argument('--worker', type=int, default=4, help="number of workers")
     parser.add_argument('--dset', type=str, default='office-home', choices=['cardiomegaly', 'VISDA-C', 'office', 'office-home', 'office-caltech'])
@@ -383,10 +388,11 @@ if __name__ == "__main__":
     parser.add_argument('--da', type=str, default='uda', choices=['uda', 'pda', 'oda'])
     parser.add_argument('--trte', type=str, default='val', choices=['full', 'val'])
     parser.add_argument('--run_name', type=str, default='chexpert_source')
-    parser.add_argument('--proj_name', type=str, default='SHOT')
+    parser.add_argument('--proj_name', type=str, default='SHOT_SexBaselines')
     parser.add_argument('--train_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
     parser.add_argument('--test_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
-    parser.add_argument('--sens_classes', type=int, default=5, help="number of sensitive classes")
+    parser.add_argument('--sens_classes', type=int, default=2, help="number of sensitive classes")
+    parser.add_argument('--sens_name', type=str, default='sex', choices=['age', 'sex', 'race'], help="name of sensitive attribute")
     parser.add_argument('--wandb', action='store_true', help="Use wandb")
     args = parser.parse_args()
 
@@ -406,7 +412,7 @@ if __name__ == "__main__":
         names = ['chexpert', 'mimic']
         args.class_num = 2
 
-    run_name = '_'.join(['SHOT', 'Source', args.dset, names[args.s][0].upper()])
+    run_name = '_'.join([args.train_resampling[0].upper(), args.test_resampling[0].upper(), 'SHOT', 'Source', args.dset, names[args.s][0].upper()])
     if args.wandb:
         print('Running', run_name)
         wandb.init(project=args.proj_name, name=run_name, config=args)
@@ -435,7 +441,7 @@ if __name__ == "__main__":
             args.src_classes = [i for i in range(25)]
             args.tar_classes = [i for i in range(65)]
 
-    args.output_dir_src = osp.join(args.output, args.da, args.dset, names[args.s][0].upper(), args.net)
+    args.output_dir_src = osp.join(args.output, args.da, args.dset, names[args.s][0].upper(), args.net, str(args.seed))
     args.name_src = names[args.s][0].upper()
     if not osp.exists(args.output_dir_src):
         os.system('mkdir -p ' + args.output_dir_src)
@@ -449,8 +455,8 @@ if __name__ == "__main__":
 
     args.out_file = open(osp.join(args.output_dir_src, 'log_test.txt'), 'w')
     for i in range(len(names)):
-        #if i == args.s:
-        #    continue
+        if i == args.s:
+            continue
         args.t = i
         args.name = names[args.s][0].upper() + names[args.t][0].upper()
 

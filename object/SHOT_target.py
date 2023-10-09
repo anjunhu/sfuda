@@ -87,36 +87,39 @@ def data_load(args):
         txt_tar = new_tar.copy()
         txt_test = txt_tar.copy()
 
-    if True: #args.s == args.t: # If doing intra-dataset demographic shfiting
+    if False: #args.s == args.t: # If doing intra-dataset demographic shfiting
         dsize = len(txt_tar)
         tr_size = int(0.75*dsize)
-        print('intra-dataset demographic shfiting', dsize, tr_size, dsize - tr_size)
         _, txt_tar = torch.utils.data.random_split(txt_tar, [tr_size, dsize - tr_size], generator=torch.Generator().manual_seed(0))
 
     txt_test = txt_tar
 
     dsets["target"] = ImageList_idx(txt_tar, root_dir=f'./data/{args.dset}', transform=image_train())
     dsets["test"] = ImageList_idx(txt_test, root_dir=f'./data/{args.dset}', transform=image_test())
+    for key in dsets:
+        print('{} dataset size {}'.format(key, len(dsets[key]) ) )
 
     train_sampler = None
     test_sampler = None
     g = torch.Generator()
     g.manual_seed(args.seed)
-    if args.train_resampling:
+    if args.train_resampling and args.train_resampling != 'natural':
         weights = dsets["target"].get_weights(args.train_resampling, flag=args.flag)
         train_sampler = WeightedRandomSampler(weights, len(weights), replacement=True, generator=g)
-    if args.test_resampling:
+    if args.test_resampling and args.test_resampling != 'natural':
         test_weights = dsets["test"].get_weights(args.test_resampling, flag=args.flag)
         test_sampler = WeightedRandomSampler(test_weights, len(test_weights), replacement=True, generator=g)
 
     dset_loaders["target"] = DataLoader(dsets["target"], batch_size=train_bs, shuffle=False, sampler=train_sampler, num_workers=args.worker, drop_last=False)
-    dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs*3, shuffle=False, sampler=test_sampler, num_workers=args.worker, drop_last=False)
+    dset_loaders["test"] = DataLoader(dsets["test"], batch_size=train_bs, shuffle=False, sampler=test_sampler, num_workers=args.worker, drop_last=False)
 
     return dset_loaders
 
-def cal_acc(loader, netF, netB, netC, args, flag=False, full=False):
+def cal_acc(loader, netF, netB, netC, args, flag=False, full=True):
     start_test = True
     group_metrics = {}
+    mem_label = obtain_label(loader, netF, netB, netC, args, False)
+    mem_label = torch.from_numpy(mem_label).cuda()
 
     with torch.no_grad():
         iter_test = iter(loader)
@@ -128,38 +131,24 @@ def cal_acc(loader, netF, netB, netC, args, flag=False, full=False):
             tar_idx = data[2]
             sensitives = data[3]
 
-            mem_label = obtain_label(loader, netF, netB, netC, args, False)
-            mem_label = torch.from_numpy(mem_label).cuda()
-            pseudolabels = mem_label[tar_idx]
             inputs = inputs.cuda()
             outputs = netC(netB(netF(inputs)))
-
-            pred = mem_label[tar_idx]
-            classifier_loss = nn.CrossEntropyLoss(reduction='none')(outputs, pred)
-
-            softmax_out = nn.Softmax(dim=1)(outputs)
-            entropy = softmax_out #torch.mean(loss.Entropy(softmax_out))
-            gentropy_loss = 0.0
-            if args.gent:
-                msoftmax = softmax_out.mean(dim=0)
-                gentropy_loss = torch.sum(-msoftmax * torch.log(msoftmax + args.epsilon))
-            im_loss = entropy - gentropy_loss
+            entropies = -(outputs.softmax(1) * outputs.log_softmax(1)).sum(1)
+            classifier_loss = nn.CrossEntropyLoss(reduction='none')(outputs, mem_label[tar_idx])
 
             if start_test:
                 all_output = outputs.float().cpu()
                 all_label = labels.float().cpu()
                 all_classifier_losses = classifier_loss.float().cpu()
-                all_im_losses = im_loss.float().cpu()
-                all_entropies = entropy.float().cpu()
                 all_sensitives = sensitives.float().cpu()
+                all_entropies = entropies.float().cpu()
                 start_test = False
             else:
                 all_output = torch.cat((all_output, outputs.float().cpu()), 0)
                 all_label = torch.cat((all_label, labels.float().cpu()), 0)
                 all_classifier_losses =  torch.cat((all_classifier_losses, classifier_loss.float().cpu()), 0)
-                all_im_losses =  torch.cat((all_im_losses, im_loss.float().cpu()), 0)
-                all_entropies = torch.cat((all_entropies, entropy.float().cpu()), 0)
                 all_sensitives =  torch.cat((all_sensitives, sensitives.float().cpu()), 0)
+                all_entropies =  torch.cat((all_entropies, entropies.float().cpu()), 0)
 
     print('\nEval Y0/Y1', all_output[all_label.squeeze()==0].shape, all_output[all_label.squeeze()==1].shape)
     for sa in range(args.sens_classes):
@@ -176,13 +165,21 @@ def cal_acc(loader, netF, netB, netC, args, flag=False, full=False):
         labels_sa = all_label[all_sensitives.squeeze()==sa]
         group_metrics[f'cls_loss A{sa}'] = (all_classifier_losses[all_sensitives.squeeze()==sa]).mean().item()
         group_metrics[f'entropy A{sa}'] = -(output_sa.softmax(1) * output_sa.log_softmax(1)).sum(1).mean(0).item()
-        group_metrics[f'im_loss A{sa}'] = (all_im_losses[all_sensitives.squeeze()==sa]).mean().item()
+        group_metrics[f'entropy_local A{sa}'] = all_entropies[all_sensitives.squeeze()==sa].mean(0).item()
+
+        sm_sa = output_sa.softmax(1)
+        entropy_loss = torch.mean(loss.Entropy(sm_sa))
+        msoftmax = sm_sa.mean(0)
+        gentropy_loss = torch.sum(-msoftmax * torch.log(msoftmax + args.epsilon))
+        im_loss = entropy_loss - gentropy_loss
+        group_metrics[f'im_loss A{sa}'] = im_loss.item()
+
         group_metrics[f'acc A{sa}'] = accuracy_score(labels_sa.to('cpu'), output_sa.to('cpu').max(1)[1])
         group_metrics[f'auc A{sa}'] = calculate_auc(F.softmax(output_sa, dim=1)[:, 1].detach().cpu(), labels_sa.to('cpu'))
+    group_metrics.update({'auc': auc, 'mean_ent': mean_ent, 'acc': accuracy,})
     pprint(group_metrics)
     if args.wandb:
-        wandb.log({'auc': auc, 'mean_ent': mean_ent})
-        wandb.log(group_metrics)
+        wandb.log(group_metrics, commit=False)
     if flag:
         matrix = confusion_matrix(all_label, torch.squeeze(predict).float())
         acc = matrix.diagonal()/matrix.sum(axis=1) * 100
@@ -204,11 +201,11 @@ def train_target(args):
     netB = network.feat_bottleneck(type=args.classifier, feature_dim=netF.in_features, bottleneck_dim=args.bottleneck).cuda()
     netC = network.feat_classifier(type=args.layer, class_num = args.class_num, bottleneck_dim=args.bottleneck).cuda()
 
-    modelpath = args.output_dir_src + '/source_F.pt'   
+    modelpath = args.output_dir_src + f'/{args.train_resampling[0].upper()}{{args.test_resampling[0].upper()}_source_F.pt'
     netF.load_state_dict(torch.load(modelpath))
-    modelpath = args.output_dir_src + '/source_B.pt'   
+    modelpath = args.output_dir_src + f'/{args.train_resampling[0].upper()}{{args.test_resampling[0].upper()}_source_B.pt'
     netB.load_state_dict(torch.load(modelpath))
-    modelpath = args.output_dir_src + '/source_C.pt'    
+    modelpath = args.output_dir_src + f'/{args.train_resampling[0].upper()}{{args.test_resampling[0].upper()}_source_C.pt'
     netC.load_state_dict(torch.load(modelpath))
     netC.eval()
     for k, v in netC.named_parameters():
@@ -230,25 +227,32 @@ def train_target(args):
     optimizer = op_copy(optimizer)
 
     acc_init = 0
+    #max_iter = len(iter(dset_loaders['target'])) #
     max_iter = args.max_epoch * len(dset_loaders["target"])
-    interval_iter = 1  #max_iter // args.interval
+    interval_iter = max_iter // args.interval
     iter_num = 0
 
     # ** Get epoch 0 metrics **
     netF.eval()
     netB.eval()
-    if args.dset=='VISDA-C':
-        acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, args, True, True)
-        log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name, iter_num, max_iter, acc_s_te) + '\n' + acc_list
-    else:
-        acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, args, False, True)
-        log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name, iter_num, max_iter, acc_s_te)
-
+    mem_label = obtain_label(dset_loaders["target"], netF, netB, netC, args)
+    mem_label = torch.from_numpy(mem_label).cuda()
+    acc_s_te, acc_list = cal_acc(dset_loaders["target"], netF, netB, netC, args, True, True)
+    log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name, iter_num, max_iter, acc_s_te) + '\n' + acc_list
     args.out_file.write(log_str + '\n')
     args.out_file.flush()
     print(log_str+'\n')
     if args.wandb:
         wandb.log({'acc_s_te': acc_s_te})
+
+    # ** Average Training Losses **
+    group_metrics = {'loss': 0., 'cls_loss': 0., 'entropy_loss': 0., 'im_loss': 0., }
+    for sa in range(args.sens_classes):
+        group_metrics[f'cls_loss A{sa}'] = 0.
+        #group_metrics[f'entropy_loss A{sa}'] = 0.
+        #group_metrics[f'im_loss A{sa}'] = 0.
+        group_metrics[f'loss A{sa}'] = 0.
+
     netF.train()
     netB.train()
 
@@ -265,7 +269,7 @@ def train_target(args):
         if iter_num % interval_iter == 0 and args.cls_par > 0:
             netF.eval()
             netB.eval()
-            mem_label = obtain_label(dset_loaders['test'], netF, netB, netC, args)
+            mem_label = obtain_label(dset_loaders["target"], netF, netB, netC, args)
             mem_label = torch.from_numpy(mem_label).cuda()
             netF.train()
             netB.train()
@@ -278,17 +282,10 @@ def train_target(args):
         features_test = netB(netF(inputs_test))
         outputs_test = netC(features_test)
 
-        if args.cls_par > 0:
-            pred = mem_label[tar_idx]
-            classifier_loss = nn.CrossEntropyLoss()(outputs_test, pred)
-            classifier_loss *= args.cls_par
-            if iter_num < interval_iter and args.dset == "VISDA-C":
-                classifier_loss *= 0
-        else:
-            classifier_loss = torch.tensor(0.0).cuda()
+        pred = mem_label[tar_idx]
+        classifier_loss = nn.CrossEntropyLoss(reduction='none')(outputs_test, pred)
 
-        if args.wandb:
-            wandb.log({'classifier_loss': classifier_loss})
+        l = classifier_loss * args.cls_par
 
         if args.ent:
             softmax_out = nn.Softmax(dim=1)(outputs_test)
@@ -298,24 +295,51 @@ def train_target(args):
                 gentropy_loss = torch.sum(-msoftmax * torch.log(msoftmax + args.epsilon))
                 entropy_loss -= gentropy_loss
             im_loss = entropy_loss * args.ent_par
-            classifier_loss += im_loss
+            l += im_loss * args.ent_par
+
+        '''
+        if args.ent:
+            softmax_out = nn.Softmax(dim=1)(outputs_test)
+            entropy_loss = -(outputs_test.softmax(1) * outputs_test.log_softmax(1)).sum(1) #loss.Entropy(softmax_out)
+            if args.gent:
+                msoftmax = softmax_out.mean(0)
+                gentropy_loss = (-msoftmax * torch.log(msoftmax + args.epsilon)).sum()
+                entropy_loss -= gentropy_loss
+            im_loss = entropy_loss
+            if iter_num == 0: print(entropy_loss.shape, gentropy_loss.shape)
+            l += im_loss * args.ent_par
+        '''
 
         optimizer.zero_grad()
-        classifier_loss.backward()
+        (l.mean(0)).backward()
         optimizer.step()
 
-        if args.wandb:
-            wandb.log({'entropy_loss': entropy_loss})
+        for sa in range(args.sens_classes):
+            group_metrics[f'loss A{sa}'] += l[sensitives==sa].mean(0).item()
+            group_metrics[f'cls_loss A{sa}'] += classifier_loss[sensitives==sa].mean(0).item()
+            #group_metrics[f'entropy_loss A{sa}'] += entropy_loss[sensitives==sa].mean(0).item()
+            #group_metrics[f'im_loss A{sa}'] += im_loss[sensitives==sa].mean(0).item()
+        group_metrics[f'loss'] += l.mean(0).item()
+        group_metrics[f'cls_loss'] += classifier_loss.mean(0).item()
+        group_metrics[f'entropy_loss'] += entropy_loss.mean().item()
+        group_metrics[f'im_loss'] += im_loss.mean().item()
 
-        if iter_num % interval_iter == 0 or iter_num == max_iter:
+        # Evaluate every epoch
+        #print(f'Epoch progress: {iter_num} /', len(iter(dset_loaders['target'])))
+        if iter_num % len(iter(dset_loaders["target"])) == 0 or iter_num == max_iter:
             netF.eval()
             netB.eval()
-            if args.dset=='VISDA-C':
-                acc_s_te, acc_list = cal_acc(dset_loaders['test'], netF, netB, netC, args, True)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name, iter_num, max_iter, acc_s_te) + '\n' + acc_list
-            else:
-                acc_s_te, _ = cal_acc(dset_loaders['test'], netF, netB, netC, args, False)
-                log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name, iter_num, max_iter, acc_s_te)
+
+            for key in group_metrics:
+                group_metrics[key] /= len(iter(dset_loaders["target"]))
+            print('Task: {}, Iter:{}/{}'.format(args.name, iter_num, max_iter))
+            wandb.log(group_metrics, commit=False)
+            pprint(group_metrics)
+            for sa in group_metrics:
+                group_metrics[key] = 0.0
+
+            acc_s_te, acc_list = cal_acc(dset_loaders["target"], netF, netB, netC, args, True, True)
+            log_str = 'Task: {}, Iter:{}/{}; Accuracy = {:.4f}'.format(args.name, iter_num, max_iter, acc_s_te) + '\n' + acc_list
 
             args.out_file.write(log_str + '\n')
             args.out_file.flush()
@@ -389,11 +413,11 @@ def obtain_label(loader, netF, netB, netC, args, verbose=True):
         aff = np.eye(K)[predict]
 
     acc = np.sum(predict == all_label.float().numpy()) / len(all_fea)
-    log_str = 'Accuracy = {:.4f} -> {:.4f}'.format(accuracy * 100, acc * 100)
+    log_str = 'Obtaining Labels: Accuracy = {:.4f} -> {:.4f}'.format(accuracy * 100, acc * 100)
 
     args.out_file.write(log_str + '\n')
     args.out_file.flush()
-    if verbose: print(log_str+'\n')
+    if verbose: print(log_str + '\n')
 
     return predict.astype('int')
 
@@ -408,10 +432,10 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=64, help="batch_size")
     parser.add_argument('--worker', type=int, default=4, help="number of workers")
     parser.add_argument('--dset', type=str, default='office-home', choices=['cardiomegaly', 'VISDA-C', 'office', 'office-home', 'office-caltech'])
-    parser.add_argument('--lr', type=float, default=1e-2, help="learning rate")
+    parser.add_argument('--lr', type=float, default=1e-3, help="learning rate")
     parser.add_argument('--net', type=str, default='resnet50', help="alexnet, vgg16, resnet50, res101")
     parser.add_argument('--seed', type=int, default=2020, help="random seed")
- 
+
     parser.add_argument('--gent', action='store_true')
     parser.add_argument('--ent', type=bool, default=True)
     parser.add_argument('--threshold', type=int, default=0)
@@ -432,10 +456,11 @@ if __name__ == "__main__":
     parser.add_argument('--wandb', action='store_true', help="Use wandb")
     parser.add_argument('--run_name', type=str, default='chexpert_source')
     parser.add_argument('--proj_name', type=str, default='SHOT')
-    parser.add_argument('--train_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
-    parser.add_argument('--test_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
+    parser.add_argument('--train_resampling', default='natural', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
+    parser.add_argument('--test_resampling', default='natural', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
     parser.add_argument('--flag', default='', choices=['', 'Younger', 'Older'], type=str, help='')
     parser.add_argument('--sens_classes', type=int, default=5, help="number of sensitive classes")
+    parser.add_argument('--sens_name', type=str, default='age', choices=['age', 'sex', 'race'], help="name of sensitive attribute")
 
     args = parser.parse_args()
 
@@ -480,8 +505,8 @@ if __name__ == "__main__":
                 args.src_classes = [i for i in range(65)]
                 args.tar_classes = [i for i in range(25)]
 
-        args.output_dir_src = osp.join(args.output_src, args.da, args.dset, names[args.s][0].upper(), args.net)
-        args.output_dir = osp.join(args.output, args.da, args.dset, names[args.s][0].upper()+names[args.t][0].upper())
+        args.output_dir_src = osp.join(args.output_src, args.da, args.dset, names[args.s][0].upper(), args.net, str(args.seed))
+        args.output_dir = osp.join(args.output, args.da, args.dset, names[args.s][0].upper()+names[args.t][0].upper(), str(args.seed))
         args.name = names[args.s][0].upper()+names[args.t][0].upper()
 
         if not osp.exists(args.output_dir):

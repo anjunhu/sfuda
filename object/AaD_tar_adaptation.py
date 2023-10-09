@@ -89,10 +89,10 @@ def data_load(args):
     tr_size = int(0.5 * dsize)
     tr_txt, te_txt = torch.utils.data.random_split(txt_src, [tr_size, dsize - tr_size])
 
-    dsets["source_tr"] = ImageList(tr_txt, root_dir=f'./data/{args.dset}/', transform=image_train())
-    dsets["source_te"] = ImageList(te_txt, root_dir=f'./data/{args.dset}/', transform=image_test())
-    dsets["target"] = ImageList_idx(txt_tar, root_dir=f'./data/{args.dset}/', transform=image_train())
-    dsets["test"] = ImageList_idx(txt_test, root_dir=f'./data/{args.dset}/', transform=image_test())
+    dsets["source_tr"] = ImageList(tr_txt, root_dir=f'./data/{args.dset}/', transform=image_train(), attribute=args.sens_name)
+    dsets["source_te"] = ImageList(te_txt, root_dir=f'./data/{args.dset}/', transform=image_test(), attribute=args.sens_name)
+    dsets["target"] = ImageList_idx(txt_tar, root_dir=f'./data/{args.dset}/', transform=image_train(), attribute=args.sens_name)
+    dsets["test"] = ImageList_idx(txt_test, root_dir=f'./data/{args.dset}/', transform=image_test(), attribute=args.sens_name)
 
     train_sampler = None
     test_sampler = None
@@ -215,7 +215,8 @@ def cal_acc(loader, fea_bank, score_bank, netF, netB, netC, args, flag=False):
             -1, args.K, -1
         )  # batch x K x C
 
-        loss = F.kl_div(softmax_out_un, score_near, reduction="none").sum(-1).sum(1)
+        #loss = F.kl_div(softmax_out_un, score_near, reduction="none").sum(-1).sum(1)
+        loss = (F.kl_div(softmax_out_un.log(), score_near.log(), reduction="none").sum(-1)).sum(1)
         #print(loss.shape, loss)
 
     _, score_bank_ = torch.max(score_bank, 1)
@@ -235,7 +236,7 @@ def cal_acc(loader, fea_bank, score_bank, netF, netB, netC, args, flag=False):
     nu_mean=sum(nu)/len(nu)
 
     s10_avg=torch.stack(s).mean(0)
-    print('nuclear mean: {:.2f}'.format(nu_mean))
+    print('nuclear mean: {:.4f}'.format(nu_mean))
 
     auc = calculate_auc(F.softmax(all_output, dim=1)[:, 1], all_label.cpu())
     print('\nEvaluating Y0/Y1', all_output[all_label.squeeze()==0].shape, all_output[all_label.squeeze()==1].shape)
@@ -246,26 +247,29 @@ def cal_acc(loader, fea_bank, score_bank, netF, netB, netC, args, flag=False):
     for sa in range(args.sens_classes):
         output_sa = all_output[all_sensitives.squeeze()==sa]
         labels_sa = all_label[all_sensitives.squeeze()==sa]
-        group_metrics[f'entropy A{sa}'] = -(output_sa.softmax(1) * output_sa.log_softmax(1)).sum(1).mean(0)
+        group_metrics[f'entropy A{sa}'] = -(output_sa.softmax(1) * output_sa.log_softmax(1)).sum(1).mean(0).item()
         group_metrics[f'acc A{sa}'] = accuracy_score(labels_sa.to('cpu'), output_sa.to('cpu').max(1)[1])
         group_metrics[f'auc A{sa}'] = calculate_auc(F.softmax(output_sa, dim=1)[:, 1].detach().cpu(), labels_sa.to('cpu'))
+        group_metrics[f'loss_kl A{sa}'] = loss[all_sensitives.squeeze()==sa].mean(0).item()
     pprint(group_metrics)
     if args.wandb:
-       wandb.log(group_metrics)
+       wandb.log(group_metrics, commit=False)
 
     if True:
         matrix = confusion_matrix(all_label, torch.squeeze(predict).float())
-        acc = matrix.diagonal() / matrix.sum(axis=1) * 100
+        acc = matrix.diagonal() / matrix.sum(axis=1)
         aacc = acc.mean()
         aa = [str(np.round(i, 2)) for i in acc]
         acc = " ".join(aa)
         if args.wandb:
-            wandb.log({'auc': auc, 'acc': aacc, 'nuclear_mean': nu_mean, 's10_avg': s10_avg})
+            metrics = {'auc': auc, 'acc': aacc, 'nuclear_mean': nu_mean, 's10_avg': s10_avg}
+            pprint(metrics)
+            wandb.log(metrics)
         if True:
             return aacc, acc  # , acc1, acc2#, nu_mean, s10_avg
 
     else:
-        return accuracy * 100, mean_ent
+        return accuracy, mean_ent
 
 
 def hyper_decay(x, beta=-2, alpha=1):
@@ -287,11 +291,11 @@ def train_target(args):
         type=args.layer, class_num=args.class_num, bottleneck_dim=args.bottleneck
     ).cuda()
 
-    modelpath = args.output_dir_src + "/source_F.pt"
+    modelpath = osp.join(args.output_dir_src, f"{args.train_resampling[0].upper()}{args.test_resampling[0].upper()}_source_F.pt")
     netF.load_state_dict(torch.load(modelpath))
-    modelpath = args.output_dir_src + "/source_B.pt"
+    modelpath = osp.join(args.output_dir_src, f"{args.train_resampling[0].upper()}{args.test_resampling[0].upper()}_source_B.pt")
     netB.load_state_dict(torch.load(modelpath))
-    modelpath = args.output_dir_src + "/source_C.pt"
+    modelpath = osp.join(args.output_dir_src, f"{args.train_resampling[0].upper()}{args.test_resampling[0].upper()}_source_C.pt")
     netC.load_state_dict(torch.load(modelpath))
 
     param_group = []
@@ -350,6 +354,27 @@ def train_target(args):
 
     real_max_iter = max_iter
 
+    # ** Get epoch 0 metrics **
+    acc, accc = cal_acc(
+                    dset_loaders["test"],
+                    fea_bank,
+                    score_bank,
+                    netF,
+                    netB,
+                    netC,
+                    args,
+                    flag=True,
+                )
+    log_str = (
+                    "Task: {}, Iter:{}/{};  Acc on target: {:.4f}".format(
+                        args.name, iter_num, max_iter, acc
+                    )
+                    + "\n"
+                    + "T: "
+                    + accc
+                )
+    print(log_str)
+
     while iter_num < real_max_iter:
         try:
             inputs_test, _, indx, sensitives = next(iter_test)
@@ -394,11 +419,9 @@ def train_target(args):
             -1, args.K, -1
         )  # batch x K x C
 
-        loss = torch.mean(
-            (F.kl_div(softmax_out_un, score_near, reduction="none").sum(-1)).sum(1)
-        ) # Equal to dot product
+        loss = (F.kl_div(softmax_out_un.log(), score_near.log(), reduction="none").sum(-1)).sum(1)
         if args.wandb:
-            wandb.log({'loss_kl': loss})
+            wandb.log({'loss_kl': loss.mean(0).item()}, commit=False)
 
         mask = torch.ones((inputs_test.shape[0], inputs_test.shape[0]))
         diag_num = torch.diag(mask)
@@ -409,18 +432,17 @@ def train_target(args):
         dot_neg = softmax_out @ copy  # batch x batch
 
         dot_neg = (dot_neg * mask.cuda()).sum(-1)  # batch
-        neg_pred = torch.mean(dot_neg)
         if args.wandb:
-            wandb.log({'loss_neg': neg_pred})
-        loss += neg_pred * alpha
+            wandb.log({'loss_neg': dot_neg.mean(0).item()}, commit=False)
+        loss += dot_neg * alpha
 
         optimizer.zero_grad()
         optimizer_c.zero_grad()
-        loss.backward()
+        (loss.mean(0)).backward()
         optimizer.step()
         optimizer_c.step()
 
-        if iter_num % interval_iter == 0 or iter_num == max_iter:
+        if iter_num % len(iter(dset_loaders["target"])) == 0 or iter_num == max_iter:
             netF.eval()
             netB.eval()
             netC.eval()
@@ -436,7 +458,7 @@ def train_target(args):
                     flag=True,
                 )
                 log_str = (
-                    "Task: {}, Iter:{}/{};  Acc on target: {:.2f}".format(
+                    "Task: {}, Iter:{}/{};  Acc on target: {:.4f}".format(
                         args.name, iter_num, max_iter, acc
                     )
                     + "\n"
@@ -450,19 +472,19 @@ def train_target(args):
             netF.train()
             netB.train()
             netC.train()
-            """if acc>acc_log:
+            if acc>acc_log:
                 acc_log = acc
                 torch.save(
                     netF.state_dict(),
-                    osp.join(args.output_dir, "target_F_" + '2021_'+str(args.tag) + ".pt"))
+                    osp.join(args.output_dir, "target_F_" + str(args.seed) +'_' + str(args.tag) + ".pt"))
                 torch.save(
                     netB.state_dict(),
                     osp.join(args.output_dir,
-                                "target_B_" + '2021_' + str(args.tag) + ".pt"))
+                                "target_B_" + str(args.seed) + '_' + str(args.tag) + ".pt"))
                 torch.save(
                     netC.state_dict(),
                     osp.join(args.output_dir,
-                                "target_C_" + '2021_' + str(args.tag) + ".pt"))"""
+                                "target_C_" + str(args.seed) + '_' + str(args.tag) + ".pt"))
 
     return netF, netB, netC
 
@@ -514,6 +536,7 @@ if __name__ == "__main__":
     parser.add_argument('--test_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
     parser.add_argument('--flag', default='', choices=['', 'Younger', 'Older'], type=str, help='')
     parser.add_argument('--sens_classes', type=int, default=5, help="number of sensitive classes")
+    parser.add_argument('--sens_name', type=str, default='age', choices=['age', 'sex', 'race'], help="name of sensitive attribute")
 
     args = parser.parse_args()
 
@@ -545,13 +568,13 @@ if __name__ == "__main__":
         args.test_dset_path = folder + args.dset + "/" + names[args.t] + "_list.txt"
 
         args.output_dir_src = osp.join(
-            args.output_src, args.da, args.dset, names[args.s][0].upper(), args.net
+            args.output_src, args.da, args.dset, names[args.s][0].upper(), args.net, str(args.seed)
         )
         args.output_dir = osp.join(
             args.output,
             args.da,
             args.dset,
-            names[args.s][0].upper() + names[args.t][0].upper(), args.net
+            names[args.s][0].upper() + names[args.t][0].upper(), args.net, str(args.seed)
         )
         args.name = names[args.s][0].upper() + names[args.t][0].upper()
 

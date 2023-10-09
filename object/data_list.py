@@ -8,7 +8,9 @@ import os.path
 import cv2
 import torchvision
 
-def make_dataset(image_list, labels):
+SENS_TO_IDX = {'age': 2, 'sex': 3, 'race': 4}
+
+def make_dataset(image_list, labels, attribute='sex'):
     len_ = len(image_list)
     if labels:
         images = [(image_list[i].strip(), labels[i, :]) for i in range(len_)]
@@ -16,8 +18,8 @@ def make_dataset(image_list, labels):
         #print(image_list)
         labels = [int(val.split()[1]) for val in image_list]
         if len(image_list[0].split()) > 2:
-            images = [(val.split()[0], int(val.split()[1]), int(val.split()[2])) for val in image_list]
-            sensitives = [int(val.split()[2]) for val in image_list]
+            images = [(val.split()[0], int(val.split()[1]), int(val.split()[SENS_TO_IDX[attribute]])) for val in image_list]
+            sensitives = [int(val.split()[SENS_TO_IDX[attribute]]) for val in image_list]
         else:
             images = [(val.split()[0], int(val.split()[1]), 0) for val in image_list]
             sensitives = [0 for val in image_list]
@@ -35,8 +37,8 @@ def l_loader(path):
             return img.convert('L')
 
 class ImageList(Dataset):
-    def __init__(self, image_list, root_dir, labels=None, transform=None, target_transform=None, mode='RGB', pseudo_item_list=None):
-        imgs, self.labels, self.sensitives = make_dataset(image_list, labels)
+    def __init__(self, image_list, root_dir, labels=None, transform=None, target_transform=None, mode='RGB', pseudo_item_list=None, attribute='sex'):
+        imgs, self.labels, self.sensitives = make_dataset(image_list, labels, attribute)
         self.root_dir = root_dir
         # self.item_list = (img_path, label, img_file)
         if pseudo_item_list:

@@ -91,9 +91,9 @@ def data_load(args):
     tr_txt = txt_src
     #te_txt = txt_src
 
-    dsets["source_tr"] = ImageList(tr_txt, root_dir=f'./data/{args.dset}/', transform=image_train())
-    dsets["source_te"] = ImageList(te_txt, root_dir=f'./data/{args.dset}/', transform=image_test())
-    dsets["test"] = ImageList(txt_test, root_dir=f'./data/{args.dset}/', transform=image_test())
+    dsets["source_tr"] = ImageList(tr_txt, root_dir=f'./data/{args.dset}/', transform=image_train(), attribute=args.sens_name)
+    dsets["source_te"] = ImageList(te_txt, root_dir=f'./data/{args.dset}/', transform=image_test(), attribute=args.sens_name)
+    dsets["test"] = ImageList(txt_test, root_dir=f'./data/{args.dset}/', transform=image_test(), attribute=args.sens_name)
 
     train_sampler = None
     test_sampler = None
@@ -237,6 +237,9 @@ def train_source(args):
             best_netF = netF.state_dict()
             best_netB = netB.state_dict()
             best_netC = netC.state_dict()
+            torch.save(best_netF, osp.join(args.output_dir_src, f"{args.train_resampling[0].upper()}{args.test_resampling[0].upper()}_source_F.pt"))
+            torch.save(best_netB, osp.join(args.output_dir_src, f"{args.train_resampling[0].upper()}{args.test_resampling[0].upper()}_source_B.pt"))
+            torch.save(best_netC, osp.join(args.output_dir_src, f"{args.train_resampling[0].upper()}{args.test_resampling[0].upper()}_source_C.pt"))
 
         netF.train()
         netB.train()
@@ -251,10 +254,6 @@ def train_source(args):
     args.out_file.write(log_str + '\n')
     args.out_file.flush()
     print(log_str+'\n')
-
-    torch.save(best_netF, osp.join(args.output_dir_src, "source_F.pt"))
-    torch.save(best_netB, osp.join(args.output_dir_src, "source_B.pt"))
-    torch.save(best_netC, osp.join(args.output_dir_src, "source_C.pt"))
 
     return netF, netB, netC
 
@@ -320,6 +319,7 @@ if __name__ == "__main__":
     parser.add_argument('--test_resampling', default='balanced', choices=['natural', 'class', 'group', 'balanced'], type=str, help='')
     parser.add_argument('--flag', default='', choices=['', 'Younger', 'Older'], type=str, help='')
     parser.add_argument('--sens_classes', type=int, default=5, help="number of sensitive classes")
+    parser.add_argument('--sens_name', type=str, default='age', choices=['age', 'sex', 'race'], help="name of sensitive attribute")
 
     args = parser.parse_args()
 
